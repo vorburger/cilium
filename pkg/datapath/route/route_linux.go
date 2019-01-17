@@ -171,8 +171,10 @@ func replaceRoute(route Route, mtuConfig mtu.Configuration) (bool, error) {
 	}
 
 	routerNet := route.getNexthopAsIPNet()
-	if _, err := replaceNexthopRoute(link, routerNet); err != nil {
-		return false, fmt.Errorf("unable to add nexthop route: %s", err)
+	if routerNet != nil {
+		if _, err := replaceNexthopRoute(link, routerNet); err != nil {
+			return false, fmt.Errorf("unable to add nexthop route: %s", err)
+		}
 	}
 
 	routeSpec := route.getNetlinkRoute()
