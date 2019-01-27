@@ -1713,6 +1713,44 @@ func (kub *Kubectl) GetCiliumPodOnNode(namespace string, node string) (string, e
 	return res.Output().String(), nil
 }
 
+func (kub *Kubectl) ciliumPreFlightCheck() error {
+	switch GetCurrentIntegration() {
+	case CIIntegrationFlannel:
+	default:
+		err := kub.CiliumStatusPreFlightCheck()
+		if err != nil {
+			return err
+		}
+	}
+	err := kub.CiliumControllersPreFlightCheck()
+	if err != nil {
+		return err
+	}
+
+	switch GetCurrentIntegration() {
+	case CIIntegrationFlannel:
+	default:
+		err = kub.CiliumHealthPreFlightCheck()
+		if err != nil {
+			return err
+		}
+	}
+	err = kub.fillServiceCache()
+	if err != nil {
+		return err
+	}
+	err = kub.CiliumServicePreFlightCheck()
+	if err != nil {
+		return err
+	}
+	err = kub.ServicePreFlightCheck("kubernetes", "default")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // CiliumPreFlightCheck specify that it checks that various subsystems within
 // Cilium are in a good state. If one of the multiple preflight fails it'll
 // return an error.
@@ -1722,40 +1760,12 @@ func (kub *Kubectl) CiliumPreFlightCheck() error {
 	// nodes cannot be show up yet, and the cilium-health can fail as a false positive.
 	var err error
 	body := func() bool {
-		switch GetCurrentIntegration() {
-		case CIIntegrationFlannel:
-		default:
-			err = kub.CiliumStatusPreFlightCheck()
-			if err != nil {
-				return false
-			}
-		}
-		err = kub.CiliumControllersPreFlightCheck()
-		if err != nil {
-			return false
-		}
-
-		switch GetCurrentIntegration() {
-		case CIIntegrationFlannel:
-		default:
-			err = kub.CiliumHealthPreFlightCheck()
-			if err != nil {
-				return false
-			}
-		}
-		err = kub.fillServiceCache()
-		if err != nil {
-			return false
-		}
-		err = kub.CiliumServicePreFlightCheck()
-		if err != nil {
-			return false
-		}
-		err = kub.ServicePreFlightCheck("kubernetes", "default")
-		if err != nil {
+		if err := kub.ciliumPreFlightCheck(); err != nil {
+			ginkgoext.By("Cilium is not ready yet: %s", err.Error())
 			return false
 		}
 		return true
+
 	}
 	timeoutErr := WithTimeout(body, "PreflightCheck failed", &TimeoutConfig{Timeout: HelperTimeout})
 	if timeoutErr != nil {
@@ -1764,16 +1774,11 @@ func (kub *Kubectl) CiliumPreFlightCheck() error {
 	return nil
 }
 
-// CiliumStatusPreFlightCheck validates the cilium status of all cilium pods
-// and returns an error if any of the pods report an unhealthy status
-func (kub *Kubectl) CiliumStatusPreFlightCheck() error {
-	ginkgoext.By("Checking that cilium status is healthy")
-
+func (kub *Kubectl) ciliumStatusPreFlightCheck() error {
 	ciliumPods, err := kub.GetCiliumPods(KubeSystemNamespace)
 	if err != nil {
 		return err
 	}
-
 	for _, pod := range ciliumPods {
 		status := kub.CiliumExec(pod, "cilium status --all-health --all-nodes")
 		if !status.WasSuccessful() {
@@ -1784,14 +1789,23 @@ func (kub *Kubectl) CiliumStatusPreFlightCheck() error {
 	return nil
 }
 
-// CiliumControllersPreFlightCheck validates that all controllers are not
-// failing. If any of the controllers fails will return an error.
-func (kub *Kubectl) CiliumControllersPreFlightCheck() error {
-	ginkgoext.By("Checking that no controllers in Cilium have failed")
+// CiliumStatusPreFlightCheck validates the cilium status of all cilium pods
+// and returns an error if any of the pods report an unhealthy status
+func (kub *Kubectl) CiliumStatusPreFlightCheck() error {
+	err := kub.ciliumStatusPreFlightCheck()
+	status := "OK"
+	if err != nil {
+		status = err.Error()
+	}
+	ginkgoext.By("Checking that cilium status is healthy: %s", status)
+	return err
+}
+
+func (kub *Kubectl) ciliumControllersPreFlightCheck() error {
 	var controllersFilter = `{range .controllers[*]}{.name}{"="}{.status.consecutive-failure-count}{"\n"}{end}`
 	ciliumPods, err := kub.GetCiliumPods(KubeSystemNamespace)
 	if err != nil {
-		return err
+		return nil
 	}
 	for _, pod := range ciliumPods {
 		status := kub.CiliumExec(pod, fmt.Sprintf(
@@ -1803,20 +1817,28 @@ func (kub *Kubectl) CiliumControllersPreFlightCheck() error {
 		for controller, status := range status.KVOutput() {
 			if status != "0" {
 				failmsg := kub.CiliumExec(pod, "cilium status --all-controllers")
-				return fmt.Errorf(
-					"cilium-agent '%s': controller %s is failing: %s",
+				return fmt.Errorf("cilium-agent '%s': controller %s is failing: %s",
 					pod, controller, failmsg.OutputPrettyPrint())
 			}
 		}
 	}
+
 	return nil
 }
 
-// CiliumHealthPreFlightCheck checks that the health status is working
-// correctly and the number of nodes does not mistmatch with the running pods.
-// It return an error if health mark a node as failed.
-func (kub *Kubectl) CiliumHealthPreFlightCheck() error {
-	ginkgoext.By("Checking that cilium-health status is healthy")
+// CiliumControllersPreFlightCheck validates that all controllers are not
+// failing. If any of the controllers fails will return an error.
+func (kub *Kubectl) CiliumControllersPreFlightCheck() error {
+	err := kub.ciliumControllersPreFlightCheck()
+	status := "OK"
+	if err != nil {
+		status = err.Error()
+	}
+	ginkgoext.By("Checking that no controllers in Cilium have failed: %s", status)
+	return err
+}
+
+func (kub *Kubectl) ciliumHealthPreFlightCheck() error {
 	var nodesFilter = `{.nodes[*].name}`
 	var statusFilter = `{range .nodes[*]}{.name}{"="}{.host.primary-address.http.status}{"\n"}{end}`
 
@@ -1858,6 +1880,19 @@ func (kub *Kubectl) CiliumHealthPreFlightCheck() error {
 		}
 	}
 	return nil
+}
+
+// CiliumHealthPreFlightCheck checks that the health status is working
+// correctly and the number of nodes does not mistmatch with the running pods.
+// It return an error if health mark a node as failed.
+func (kub *Kubectl) CiliumHealthPreFlightCheck() error {
+	err := kub.ciliumHealthPreFlightCheck()
+	status := "OK"
+	if err != nil {
+		status = err.Error()
+	}
+	ginkgoext.By("Checking that cilium-health status is healthy: %s", status)
+	return err
 }
 
 // serviceCache keeps service information from
