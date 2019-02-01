@@ -430,8 +430,21 @@ func (e *Endpoint) Regenerate(owner Owner, regenMetadata *ExternalRegenerationMe
 			e.getLogger().Debug("Dequeued endpoint from build queue")
 
 			regenContext.DoneFunc = doneFunc
-			err := e.regenerate(owner, regenContext)
+
+			epEvent := &EndpointEvent{
+				endpointEventMetadata: EndpointRegenerationEvent{
+					owner:        owner,
+					regenContext: regenContext,
+				},
+				eventResults: make(chan interface{}),
+			}
+
+			e.eventQueue.events <- epEvent
 			doneFunc() // in case not called already
+
+			result := <-epEvent.eventResults
+			regenResult := result.(EndpointRegenerationResult)
+			err = regenResult.err
 
 			repr, reprerr := monitorAPI.EndpointRegenRepr(e, err)
 			if reprerr != nil {
