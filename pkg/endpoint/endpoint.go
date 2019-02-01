@@ -316,6 +316,19 @@ func NewEventQueue() *EventQueue {
 
 }
 
+func (e *Endpoint) PolicyRevisionBumpEvent(rev uint64) {
+	epBumpEvent := &EndpointEvent{
+		EndpointEventMetadata: EndpointRevisionBumpEvent{
+			Rev: rev,
+		},
+		EventResults: make(chan interface{}, 1),
+	}
+	e.QueueEvent(epBumpEvent)
+	_ = <-epBumpEvent.EventResults
+	e.getLogger().Infof("bumped endpoint revision to %d", rev)
+
+}
+
 type EventQueue struct {
 	// This should be a buffered channel
 	events chan *EndpointEvent
@@ -327,13 +340,13 @@ type EventQueue struct {
 // the run function was done. Kill it with a context possibly.
 // How do we handle blocks that run in parallel?
 type EndpointEvent struct {
-	endpointEventMetadata interface{}
-	eventResults          chan interface{}
+	EndpointEventMetadata interface{}
+	EventResults          chan interface{}
 }
 
 func NewEndpointEvent() *EndpointEvent {
 	return &EndpointEvent{
-		eventResults: make(chan interface{}, 1),
+		EventResults: make(chan interface{}, 1),
 	}
 }
 
@@ -364,6 +377,9 @@ func (e *Endpoint) RunEventQueue() {
 		})
 
 }
+func (e *Endpoint) QueueEvent(epEvent *EndpointEvent) {
+	e.eventQueue.events <- epEvent
+}
 
 func (e *Endpoint) runEventQueue() {
 	for {
@@ -372,17 +388,17 @@ func (e *Endpoint) runEventQueue() {
 		// Receive the next event from the endpoint event queue
 		case endpointEvent := <-e.eventQueue.events:
 			{
-				switch endpointEvent.endpointEventMetadata.(type) {
+				switch endpointEvent.EndpointEventMetadata.(type) {
 				case EndpointRegenerationEvent:
 
-					ev := endpointEvent.endpointEventMetadata.(EndpointRegenerationEvent)
+					ev := endpointEvent.EndpointEventMetadata.(EndpointRegenerationEvent)
 					e.getLogger().Info("received endpoint regeneration event")
 					err := e.regenerate(ev.owner, ev.regenContext)
 					e.getLogger().Info("sending endpoint regeneration result")
 					regenResult := EndpointRegenerationResult{
 						err: err,
 					}
-					endpointEvent.eventResults <- regenResult
+					endpointEvent.EventResults <- regenResult
 				case EndpointRevisionBumpEvent:
 					// If the endpoint is not in a 'ready' state that means that
 					// we cannot set the policy revision, as something else has
@@ -391,10 +407,10 @@ func (e *Endpoint) runEventQueue() {
 					// regeneration failed, so there is no way that we can
 					// realize the policy revision yet.
 					e.getLogger().Info("received endpoint revision bump event")
-					ev := endpointEvent.endpointEventMetadata.(EndpointRevisionBumpEvent)
+					ev := endpointEvent.EndpointEventMetadata.(EndpointRevisionBumpEvent)
 					e.getLogger().Info("sending endpoint revision bump result")
-					e.SetPolicyRevision(ev.rev)
-					endpointEvent.eventResults <- struct{}{}
+					e.SetPolicyRevision(ev.Rev)
+					endpointEvent.EventResults <- struct{}{}
 				// waiting for proxy as an event type?
 				// Three types of events:
 				// global event: global build that locks out everything else (netdev build, init.sh, etc.).
@@ -433,7 +449,7 @@ func (e *Endpoint) runEventQueue() {
 				default:
 					e.getLogger().Error("unsupported function type provided to Endpoint event queue")
 				}
-				close(endpointEvent.eventResults)
+				close(endpointEvent.EventResults)
 			}
 		// When the endpoint is deleted, cause goroutine which consumes events
 		// from queue to exit via closing close channel.
@@ -459,12 +475,8 @@ type EndpointRegenerationResult struct {
 }
 
 type EndpointRevisionBumpEvent struct {
-	rev uint64
+	Rev uint64
 }
-
-type RegenFunc func(owner Owner, regenMetadata *ExternalRegenerationMetadata) error
-
-type PolicyRevisionBumpFunc func(rev uint64)
 
 // UpdateController updates the controller with the specified name with the
 // provided list of parameters in endpoint's list of controllers.

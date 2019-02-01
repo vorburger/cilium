@@ -36,6 +36,12 @@ type rule struct {
 	// localRuleConsumers is the set of the numeric identifiers which this rule
 	// selects which are node-local (e.g., Endpoint).
 	localRuleConsumers map[uint16]*identity.Identity
+
+	// processedConsumers tracks which consumers have been 'processed' - that is,
+	// it determines whether the consumer has actually been processed in relation
+	// to this rule. It does *not* encode whether the rule selects the consumer;
+	// that is what localRuleConsumers is for.
+	processedConsumers map[uint16]struct{}
 }
 
 func (r *rule) String() string {

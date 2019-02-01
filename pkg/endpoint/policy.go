@@ -155,7 +155,7 @@ func (e *Endpoint) regeneratePolicy(owner Owner) error {
 	// policy needs to be enforced for either ingress or egress.
 	e.prevIdentityCache = labelsMap
 
-	calculatedPolicy, err := repo.ResolvePolicy(e.ID, e.SecurityIdentity.LabelArray, e, *labelsMap)
+	calculatedPolicy, err := repo.ResolvePolicy(e.ID, e.SecurityIdentity, e, *labelsMap)
 	if err != nil {
 		return err
 	}
@@ -432,17 +432,17 @@ func (e *Endpoint) Regenerate(owner Owner, regenMetadata *ExternalRegenerationMe
 			regenContext.DoneFunc = doneFunc
 
 			epEvent := &EndpointEvent{
-				endpointEventMetadata: EndpointRegenerationEvent{
+				EndpointEventMetadata: EndpointRegenerationEvent{
 					owner:        owner,
 					regenContext: regenContext,
 				},
-				eventResults: make(chan interface{}),
+				EventResults: make(chan interface{}),
 			}
 
 			e.eventQueue.events <- epEvent
 			doneFunc() // in case not called already
 
-			result := <-epEvent.eventResults
+			result := <-epEvent.EventResults
 			regenResult := result.(EndpointRegenerationResult)
 			err = regenResult.err
 
