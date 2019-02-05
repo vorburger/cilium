@@ -32,12 +32,13 @@ import (
 )
 
 const (
-	ciliumOutputChain     = "CILIUM_OUTPUT"
-	ciliumPostNatChain    = "CILIUM_POST"
-	ciliumPostMangleChain = "CILIUM_POST_mangle"
-	ciliumPreMangleChain  = "CILIUM_PRE_mangle"
-	ciliumForwardChain    = "CILIUM_FORWARD"
-	feederDescription     = "cilium-feeder:"
+	ciliumOutputChain       = "CILIUM_OUTPUT"
+	ciliumPostNatChain      = "CILIUM_POST"
+	ciliumPostMangleChain   = "CILIUM_POST_mangle"
+	ciliumPreMangleChain    = "CILIUM_PRE_mangle"
+	ciliumMangleDivertChain = "CILIUM_PROXY_DIVERT"
+	ciliumForwardChain      = "CILIUM_FORWARD"
+	feederDescription       = "cilium-feeder:"
 )
 
 var useIp6tables bool
@@ -69,14 +70,14 @@ func getFeedRule(name, args string) []string {
 
 func (c *customChain) add() error {
 	err := runProg("iptables", []string{"-t", c.table, "-N", c.name}, false)
-	if err == nil && c.ipv6 == true {
+	if err == nil && c.ipv6 == true && node.GetIPv6AllocRange() != nil {
 		err = runProg("ip6tables", []string{"-t", c.table, "-N", c.name}, false)
 		if err == nil {
 			useIp6tables = true
 		} else {
 			useIp6tables = false
-			log.WithError(err).Info("No ip6tables support, IPv6 redirects will not work.")
-			// err = nil
+			log.WithError(err).Error("No ip6tables support, IPv6 redirects will not work.")
+			err = nil
 		}
 	}
 	return err
@@ -198,6 +199,13 @@ var ciliumChains = []customChain{
 		feederArgs: []string{""},
 	},
 	{
+		name:       ciliumMangleDivertChain,
+		table:      "mangle",
+		hook:       "PREROUTING",
+		feederArgs: []string{},
+		ipv6:       true,
+	},
+	{
 		name:       ciliumPreMangleChain,
 		table:      "mangle",
 		hook:       "PREROUTING",
@@ -214,9 +222,14 @@ var ciliumChains = []customChain{
 
 // RemoveRules removes iptables rules installed by Cilium.
 func RemoveRules() {
+	// Set of tables that has had iptables rules in any Cilium version
 	tables := []string{"nat", "mangle", "raw", "filter"}
 	for _, t := range tables {
 		removeCiliumRules(t, "iptables")
+	}
+	// Set of tables that has had ip6tables rules in any Cilium version
+	tables6 := []string{"mangle"}
+	for _, t := range tables6 {
 		removeCiliumRules(t, "ip6tables")
 	}
 
@@ -292,7 +305,58 @@ func installEgressProxyRule(l4proto string, proxyPort uint16) error {
 	return err
 }
 
+func installDivertProxyRules() error {
+	err := runProg("iptables", []string{
+		"-t", "mangle",
+		"-A", ciliumPreMangleChain,
+		"-p", "tcp",
+		"-m", "socket", "--transparent",
+		"-m", "comment", "--comment", "cilium: TPROXY to host ingress proxy on " + defaults.HostDevice,
+		"-j", ciliumMangleDivertChain}, false)
+	if err == nil && useIp6tables {
+		err = runProg("ip6tables", []string{
+			"-t", "mangle",
+			"-A", ciliumPreMangleChain,
+			"-p", "tcp",
+			"-m", "socket", "--transparent",
+			"-m", "comment", "--comment", "cilium: TPROXY to host ingress proxy on " + defaults.HostDevice,
+			"-j", ciliumMangleDivertChain}, false)
+	}
+	if err != nil {
+		log.WithError(err).Warningf("No iptables -m socket support, all packets will go through TPROXY instead.")
+	}
+	toProxyMark := fmt.Sprintf("%#08x/%#08x", proxy.MagicMarkIsToProxy, proxy.MagicMarkHostMask|0xFF)
+	err = runProg("iptables", []string{
+		"-t", "mangle",
+		"-A", ciliumMangleDivertChain,
+		"-j", "MARK",
+		"--set-mark", toProxyMark}, false)
+	if err == nil {
+		err = runProg("iptables", []string{
+			"-t", "mangle",
+			"-A", ciliumMangleDivertChain,
+			"-j", "ACCEPT"}, false)
+	}
+	if err == nil && useIp6tables {
+		err = runProg("ip6tables", []string{
+			"-t", "mangle",
+			"-A", ciliumMangleDivertChain,
+			"-j", "MARK",
+			"--set-mark", toProxyMark}, false)
+		if err == nil {
+			err = runProg("ip6tables", []string{
+				"-t", "mangle",
+				"-A", ciliumMangleDivertChain,
+				"-j", "ACCEPT"}, false)
+		}
+	}
+	return err
+}
+
 func installProxyRules() error {
+	if err := installDivertProxyRules(); err != nil {
+		return err
+	}
 	for _, v := range proxy.ProxyPorts {
 		// Redirect packets to the host proxy via TPROXY, as directed by the Cilium
 		// datapath bpf programs via skb marks (egress) or DSCP (ingress).
@@ -461,7 +525,7 @@ func InstallRules(ifName string) error {
 			"-s", node.GetIPv4AllocRange().String(),
 			"-m", "mark", "!", "--mark", matchFromIPSecDecrypt, // Don't match ipsec traffic
 			"-m", "mark", "!", "--mark", matchFromIPSecEncrypt, // Don't match ipsec traffic
-			"-m", "mark", "!", "--mark", matchFromProxy, // Don't match proxy traffic
+			"-m", "mark", "!", "--mark", matchFromProxy, // Don't match proxy (return) traffic
 			"-o", ifName,
 			"-m", "comment", "--comment", "cilium hostport loopback masquerade",
 			"-j", "SNAT", "--to-source", node.GetHostMasqueradeIPv4().String()}, false); err != nil {
