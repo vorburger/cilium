@@ -51,19 +51,18 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_DROP_NOTIFY) int __send_drop_notify
 {
 	uint64_t skb_len = (uint64_t)skb->len, cap_len = min((uint64_t)TRACE_PAYLOAD_LEN, (uint64_t)skb_len);
 	uint32_t hash = get_hash_recalc(skb);
-	uint32_t srcdst_info = skb->cb[1];
 	struct drop_notify msg = {
 		.type = CILIUM_NOTIFY_DROP,
 		.source = EVENT_SOURCE,
 		.hash = hash,
 		.len_orig = skb_len,
 		.len_cap = cap_len,
-		.src_label = srcdst_info >> 16,
-		.dst_label = srcdst_info & 0xFFFF,
-		.dst_id = skb->cb[3],
+		.src_label = skb->cb[0],
+		.dst_label = skb->cb[1],
+		.dst_id = (skb->cb[3] >> 16),
 		.ifindex = skb->cb[4],
 	};
-	int error = skb->cb[2];
+	int error = skb->cb[3] & 0xFFFF;
 
 	if (error < 0)
 		error = -error;
@@ -74,7 +73,7 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_DROP_NOTIFY) int __send_drop_notify
 			 (cap_len << 32) | BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 
-	return skb->cb[0];
+	return skb->cb[2];
 }
 
 /**
@@ -95,11 +94,11 @@ static inline int send_drop_notify(struct __sk_buff *skb, __u32 src, __u32 dst,
 				   __u32 dst_id, __u32 ifindex, int reason,
 				   int exitcode, __u8 direction)
 {
-	skb->cb[0] = exitcode;
-	skb->cb[1] = (src << 16) | (dst & 0xFFFF);
-	skb->cb[2] = reason;
-	skb->cb[3] = dst_id;
-	skb->cb[4] = ifindex,
+	skb->cb[0] = src;
+	skb->cb[1] = dst;
+	skb->cb[2] = exitcode;
+	skb->cb[3] = (dst_id << 16) | reason;
+	skb->cb[4] = ifindex;
 
 	update_metrics(skb->len, direction, -reason);
 
